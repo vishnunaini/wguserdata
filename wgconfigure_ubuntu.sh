@@ -1,5 +1,9 @@
 #!/bin/bash
 
+#WORK IN PROGRESS
+#UNFIT FOR PROD
+
+
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root" 1>&2
    exit 1
@@ -30,73 +34,145 @@ useradd -G sudo -s /bin/bash -m $WIREUSERNAME
 block_root_shell (){
 	#block root shell
 	usermod --shell /usr/sbin/nologin root
-	printf "root bash shell block : " 
+	printf "Blocking shell access for root user : " 
 	if grep -Fxq "root:x:0:0:root:/root:/usr/sbin/nologin" /etc/passwd
 		then
 		print_success
 	else
 		print_fail
+	fi
 }
 
 if [ -f /home/$WIREUSERNAME/.ssh/authorized_keys ]
 	then
 	echo $SSHPUBKEY >> ~/.ssh/authorized_keys
 
-	if grep -Fxq "$SSHPUBKEY" /home/$WIREUSERNAME/.ssh/authorized_keys
-	then
-		printf "add ssh pub key to authorized_keys : " 
+	printf "add ssh pub key to authorized_keys : " 
+
+		if grep -Fxq "$SSHPUBKEY" /home/$WIREUSERNAME/.ssh/authorized_keys
+		then
 			print_success
-		block_root_shell
-	else
-		printf "add ssh pub key to authorized_keys : "
+			block_root_shell
+		else
 			print_fail
-		printf "root bash shell block : "
-			print_intact
-	fi
+			printf "${KRED}Skipping :${KNORM} Blocking shell access for root user\n"
+		fi
 else
 	printf "add ssh pub key to authorized_keys : "
 			print_fail
 	printf "${KRED}Error : user ${KBLUE}${WIREUSERNAME}${KRED}'s .ssh folder doesn't exist\n${KNORM}"
 fi
 
-sudo sed -i {s/mirrors.digitalocean.com/archive.ubuntu.com/} /etc/apt/sources.list
+sed -i {s/mirrors.digitalocean.com/archive.ubuntu.com/} /etc/apt/sources.list
 printf "change update servers to upstream : completed\n"
 
-printf "updating apt lists\n Installing wireguard, unbound dns server and upgrading everything else\n"
-sudo apt update
+printf "Updating apt update cache\n"
+apt update
 
 printf "Installing wireguard, unbound dns server and qrencode\n"
-sudo apt install wireguard unbound unbound-host qrencode -y
+apt install wireguard unbound unbound-host qrencode -y
 
-printf "applying latest security and kernel updates\n"
-sudo apt full-upgrade -y
+printf "Applying latest security and kernel updates\n"
+apt full-upgrade -y
 
 printf "Generating wireguard server private and public keys in /etc/wireguard\n"
 
 	umask 077
-	sudo wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+	wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
 
 printf "wg server private key is at ${KBLUE}/etc/wireguard/server_private.key\n${KNORM}"
 
 printf "wg server public key is at ${KBLUE}/etc/wireguard/server_public.key\n${KNORM}"
 
-WG_SERVER_PUBKEY="$( sudo cat /etc/wireguard/server_public.key )"
+WG_SERVER_PUBKEY="$( cat /etc/wireguard/server_public.key )"
 
 printf "Your wg server public key is: ${KBLUE}${WG_SERVER_PUBKEY}\n${KNORM}"
 
-printf  
+SERVER_WG_IP_IPv4="10.3.0.1"
+SERVER_WG_IP_IPv6="fdc9:281f:04d7:9ee9::1"
+WGCONF="/etc/wireguard/wg0.conf"
 
+##Server IPv4 interface
+server_wg_ip_ipv4_setup () {
+	printf "Enter a IPv4 RFC1918 Local IP for your server in the tunnel (/32 only) (default : 10.3.0.1) : "
+	read -i $SERVER_WG_IP_IPv4 -e SERVER_WG_IP_IPv4
+}
 
+server_wg_ip_ipv4_setup
 
-input_peer_count () {
+printf "wg server IPv4 interface IP : ${SERVER_WG_IP_IPv4}/32\n"
+printf "[Interface]\nAddress = ${SERVER_WG_IP_IPv4}/32\n" | tee -a $WGCONF
 
-	printf "How many peers do you want to add to this server? Enter a number:"
-	read NUM_PEERS
+##Server IPv6 interface
+server_wg_ip_ipv6_read () {
+        printf "Enter a IPv6 scope Local IP for your server in the tunnel (/128 only) (default : fdc9:281f:04d7:9ee9::1 ) : "
+        read -i $SERVER_WG_IP_IPv6 -e SERVER_WG_IP_IPv6
+}
+
+server_wg_ip_ipv6_setup () {
+
+	server_wg_ip_ipv6_read
+	printf "Address = ${SERVER_WG_IP_IPv6}/128\n" | tee -a $WGCONF;
 
 }
 
 
-sudo mv ~/wg/* /etc/wireguard/
+printf "\nDo you want to enable IPv6 inside the tunnel?"
+select yn in "Yes" "No"; do
+    case $yn in
+        Yes ) server_wg_ip_ipv6_setup ; break;;
+        No ) break;;
+    esac
+done
+
+read_port_number () {
+SERVER_WG_LISTEN_PORT="49152"
+printf "Enter the port for wireguard to listen on (default: ${SERVER_WG_LISTEN_PORT}) : "
+read -i $SERVER_WG_LISTEN_PORT -e SERVER_WG_LISTEN_PORT
+
+}
+
+read_port_number
+until [[ $SERVER_WG_LISTEN_PORT =~ ^([0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$ ]]
+	do
+	    echo "Oops! Invalid port number!"
+	    echo
+		read_port_number
+	done
+
+printf "ListenPort = ${SERVER_WG_LISTEN_PORT}\n" | tee -a $WGCONF;
+
+
+input_peer_count () {
+	read NUM_PEERS
+
+	if [ -z "$NUM_PEERS" ]
+		then NUM_PEERS=1
+	fi
+
+	while [[ $NUM_PEERS =~ ^([1-9]{1,1}])$ ]]
+        do
+		echo "Oops! Invalid input ! Maximum allowed is 9 peers!"
+		echo
+		input_peer_count
+        done
+}
+
+printf "Enter the number of VPN Peers do you want to add to this server (default :1, Maximum: 9) :"
+input_peer_count
+printf "\nAdding $NUM_PEERS Peer(s)\n"
+
+
+gen_peer_keys () {
+
+}
+
+input_peer_ips () {
+
+}
+
+
+
 sudo curl -o /var/lib/unbound/root.hints https://www.internic.net/domain/named.cache
 sudo chown unbound:unbound /var/lib/unbound/root.hints
 #sudo nano /etc/unbound/unbound.conf
